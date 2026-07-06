@@ -1,0 +1,46 @@
+// ============================================================================
+// Take-home assessment — minimal SFZ drum mapping
+// ============================================================================
+//
+// PURPOSE
+//   Map a local WAV sample to a MIDI note so candidates can audition a single
+//   drum voice (kick on note 36) inside test_render_pipeline.py.
+//
+// QUICK SETUP
+//   1. A bundled kick.wav ships next to this file (swap in your own if desired)
+//   2. Update the sample= line in the <region> block below when replacing it
+//   3. Point test_render_pipeline.py at this SFZ via SFZ_INSTRUMENT_PATH
+//
+// GAIN STAGING
+//   pysfizz output can peak very quietly. Raise amplitude below and/or
+//   peak-normalize the rendered stem before sending audio to the master chain.
+//
+// FREE SAMPLE IDEAS (download locally — do not commit copyrighted assets)
+//   - Freesound.org — search "kick drum one shot" (check license)
+//   - University of Iowa MIS — percussion one-shots (free for research/education)
+//   - Bedroom Producers Blog — free TR-style drum one-shots
+//
+// MIDI NOTE REFERENCE (General MIDI drum map excerpt)
+//   36 = Kick (C1)
+//   38 = Snare (D1)
+//   42 = Closed hi-hat (F#1)
+//   46 = Open hi-hat (A#1)
+//
+// Add more <region> blocks to map additional samples to other note numbers.
+// ============================================================================
+
+<group>
+amplitude=1.0
+
+<region>
+// Kick drum — triggered when your MIDI track sends note 36
+sample=kick.wav
+lokey=36
+hikey=36
+pitch_keycenter=36
+
+// Optional: tighten the envelope for drum one-shots
+ampeg_attack=0.001
+ampeg_decay=0.35
+ampeg_sustain=0.0
+ampeg_release=0.05

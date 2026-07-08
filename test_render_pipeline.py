@@ -27,6 +27,7 @@ from collections import deque
 import pysfizz
 from typing import Dict, Tuple
 import numpy as np
+from pedalboard import Pedalboard, Compressor, Delay, Distortion
 
 logger = logging.getLogger(__name__)
 
@@ -430,9 +431,22 @@ def apply_master_chain(dry_audio: Any, sample_rate: int) -> Any:
     """
     logger.info("Applying master chain: Saturation → Compressor → Delay")
 
-    # TODO(candidate): build Pedalboard chain in the order above and process audio
+    board = Pedalboard(
+        [
+            Distortion(drive_db=6.0),
+            Compressor(
+                threshold_db=-20,
+                ratio=2,
+                attack_ms=5,
+                release_ms=100,
+            ),
+            Delay(delay_seconds=0.35, feedback=0.4, mix=0.25),
+        ]
+    )
 
-    return dry_audio  # stub — pass-through until implemented
+    processed = board(dry_audio.T, sample_rate)
+    logger.info("Applying master chain: Completed")
+    return processed.T
 
 
 def write_wav(path: Path, audio: Any, sample_rate: int) -> None:

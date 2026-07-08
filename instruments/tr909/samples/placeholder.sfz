@@ -44,3 +44,10 @@ ampeg_attack=0.001
 ampeg_decay=0.35
 ampeg_sustain=0.0
 ampeg_release=0.05
+
+<region>
+// Organ sound to be used for synth chords
+sample=organ.wav
+lokey=48
+hikey=72
+pitch_keycenter=60

@@ -14,8 +14,19 @@ import sys
 import wave
 from pathlib import Path
 from typing import Any
-from mido import Message, MidiFile, MidiTrack, MetaMessage, bpm2tempo
+from mido import (
+    Message,
+    MidiFile,
+    MidiTrack,
+    MetaMessage,
+    bpm2tempo,
+    tempo2bpm,
+    tick2second,
+)
 from collections import deque
+import pysfizz
+from typing import Dict, Tuple
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +70,9 @@ MIDI_NOTE_KICK = 36
 
 DEFAULT_VELOCITY_DRUMS = 127
 BAR_LENGTH_IN_BEATS = 4
+
+DEFAULT_BPM = 120
+SECONDS_PER_MINUTE = 60
 
 
 def configure_logging() -> None:
@@ -266,10 +280,132 @@ def render_midi_with_sfizz(
 
     if not sfz_path.is_file():
         logger.warning("SFZ not found at %s — returning silent stem stub", sfz_path)
+        return np.zeros((int(duration_sec * sample_rate), 2), dtype=np.float32)
 
-    # TODO(candidate): load pysfizz, schedule events, render blocks into numpy audio
+    synth = pysfizz.Synth(sample_rate=sample_rate, block_size=block_size)
+    synth.load_sfz_file(str(sfz_path))
 
-    return None  # stub — replace with rendered numpy array
+    # detecting tempo or falling back to default
+    midi_tempo = None
+
+    for midi_msg in midi_data.tracks[0]:
+        if midi_msg.type == 'set_tempo':
+            midi_tempo = midi_msg.tempo
+            break
+
+    if midi_tempo is None:
+        midi_tempo = bpm2tempo(DEFAULT_BPM)
+        logger.warning(
+            "Tempo not found. Falling back to default tempo of %s",
+            midi_tempo
+        )
+
+    midi_bpm = tempo2bpm(midi_tempo)
+    logger.info("Detected MIDI tempo: %s microseconds per beat", midi_tempo)
+    logger.info("BPM: %s", midi_bpm)
+
+    samples_per_second = sample_rate
+    beats_per_second = midi_bpm / SECONDS_PER_MINUTE  # 60 seconds per minute
+    ticks_per_second = TICKS_PER_BEAT * beats_per_second
+    samples_per_tick = samples_per_second / ticks_per_second
+
+    MidiNoteData = Tuple[
+        int,  # velocity
+        float,  # start time in seconds
+        float,  # duration in seconds
+        int  # start sample
+    ]
+    MidiNoteEvents = Dict[int, MidiNoteData]  # note number -> MidiNoteData
+
+    # extract note events from MIDI tracks and convert to sample offsets
+    midi_notes = []
+
+    for i, track in enumerate(midi_data.tracks):
+
+        note_events: MidiNoteEvents = {}
+        time_ticks = 0
+        time_sec = 0.0
+
+        logger.info("Reading track %s: %s", i, track.name)
+
+        for midi_msg in track:
+            if midi_msg.type == 'note_on' and midi_msg.velocity > 0:
+                time_ticks += midi_msg.time
+                time_sec = tick2second(time_ticks, TICKS_PER_BEAT, midi_tempo)
+                note_events[midi_msg.note] = (
+                    midi_msg.velocity,
+                    time_sec,
+                    None,
+                    int(time_ticks * samples_per_tick)
+                )
+            elif midi_msg.type == 'note_off' or (midi_msg.type == 'note_on' and midi_msg.velocity == 0):
+                time_ticks += midi_msg.time
+                time_sec = tick2second(time_ticks, TICKS_PER_BEAT, midi_tempo)
+                if midi_msg.note in note_events:
+                    velocity, start_time, _, start_sample = note_events[
+                        midi_msg.note
+                    ]
+                    midi_notes.append(
+                        (
+                            midi_msg.note,
+                            velocity,
+                            start_time,
+                            time_sec - start_time,
+                            start_sample,
+                        )
+                    )
+
+    # render notes and mix
+    duration_samples = int(duration_sec * sample_rate)
+    rendered_mix = np.zeros((2, duration_samples), dtype=np.float32)
+
+    tail_sec = 0.0  # extra time for note tails
+
+    for midi_note in midi_notes:
+        note = midi_note[0]
+        velocity = midi_note[1]
+        duration = midi_note[3]
+        render_duration = duration + tail_sec
+        start_sample = midi_note[4]
+
+        rendered_note = synth.render_note(
+            note,
+            velocity,
+            duration,
+            render_duration
+        )
+
+        note_length_samples = rendered_note.shape[1]
+        if start_sample >= duration_samples:
+            logger.warning(
+                "Note %s starts too late; skipping", note
+            )
+            continue
+
+        if start_sample + note_length_samples > duration_samples:
+            logger.warning(
+                "Note %s exceeds total duration; clipping to fit", note
+            )
+            rendered_note = rendered_note[:, :duration_samples - start_sample]
+            note_length_samples = rendered_note.shape[1]
+
+        # add note to final mix
+        rendered_mix[
+            :,
+            start_sample:(start_sample + note_length_samples)
+        ] += rendered_note
+
+    # peak normalize the final mix
+    peak = np.max(np.abs(rendered_mix))
+    if peak != 0:
+        rendered_mix /= peak
+
+    logger.info("%s MIDI notes rendered in total", len(midi_notes))
+
+    # transpose to (num_samples, channels)
+    rendered_mix_formatted = rendered_mix.T.astype(np.float32)
+
+    return rendered_mix_formatted
 
 
 def apply_master_chain(dry_audio: Any, sample_rate: int) -> Any:

@@ -14,6 +14,8 @@ import sys
 import wave
 from pathlib import Path
 from typing import Any
+from mido import Message, MidiFile, MidiTrack, MetaMessage, bpm2tempo
+from collections import deque
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +49,16 @@ SAMPLE_RATE = 48_000
 BLOCK_SIZE = 512
 STEPS_PER_BAR = 16
 TICKS_PER_BEAT = 480  # used for 16th-note grid math in MIDI construction
+
+TYPE_SYNCHRONOUS = 1  # MIDI file type to start all tracks at the same time
+
+CHANNEL_DRUMS = 9  # MIDI channel used for drums by convention
+CHANNEL_SYNTH = 0
+
+MIDI_NOTE_KICK = 36
+
+DEFAULT_VELOCITY_DRUMS = 127
+BAR_LENGTH_IN_BEATS = 4
 
 
 def configure_logging() -> None:
@@ -90,16 +102,143 @@ def parse_arrangement_to_midi(arrangement: dict[str, Any]) -> Any:
     """
     logger.info("Parsing arrangement to MIDI (tempo=%s)", arrangement["tempo"])
 
-    # TODO(candidate): implement MIDI construction with mido
-    # Example skeleton:
-    #   mid = MidiFile(ticks_per_beat=480)
-    #   track = MidiTrack()
-    #   mid.tracks.append(track)
-    #   track.append(Message("program_change", program=0, time=0))
-    #   ...
-    #   return mid
+    mid = MidiFile(ticks_per_beat=TICKS_PER_BEAT, type=TYPE_SYNCHRONOUS)
 
-    return None  # stub — replace with MidiFile
+    tempo = arrangement["tempo"]
+    length = arrangement["length"]
+
+    # Metadata
+    metadata_track = MidiTrack()
+    mid.tracks.append(metadata_track)
+    metadata_track.append(MetaMessage('track_name', name='Metadata', time=0))
+    metadata_track.append(
+        MetaMessage(
+            'time_signature',
+            numerator=4,
+            denominator=4,
+            time=0
+        )
+    )
+    metadata_track.append(
+        MetaMessage(
+            'set_tempo', tempo=bpm2tempo(tempo), time=0
+        )
+    )
+
+    # Drums
+    drum_track = MidiTrack()
+    mid.tracks.append(drum_track)
+    drum_track.append(MetaMessage('track_name', name='Drums', time=0))
+
+    steps_per_beat = STEPS_PER_BAR / BAR_LENGTH_IN_BEATS
+    drum_note_duration = int(TICKS_PER_BEAT / steps_per_beat)
+
+    wait_time_drums = 0  # time since last MIDI message in ticks
+
+    for bar in range(length):
+        for step in arrangement["drum_grid"]:
+            if step == 1:
+                drum_track.append(
+                    Message(
+                        'note_on',
+                        note=MIDI_NOTE_KICK,
+                        velocity=DEFAULT_VELOCITY_DRUMS,
+                        channel=CHANNEL_DRUMS,
+                        time=wait_time_drums
+                    )
+                )
+                drum_track.append(
+                    Message(
+                        'note_off',
+                        note=MIDI_NOTE_KICK,
+                        velocity=DEFAULT_VELOCITY_DRUMS,
+                        channel=CHANNEL_DRUMS,
+                        time=drum_note_duration
+                    )
+                )
+                wait_time_drums = 0
+            else:
+                wait_time_drums += drum_note_duration
+
+    logger.info("Parsing drums arrangement completed")
+
+    # Synth
+    synth_chords_track = MidiTrack()
+    mid.tracks.append(synth_chords_track)
+    synth_chords_track.append(
+        MetaMessage('track_name', name='Synth Chords', time=0)
+    )
+
+    for bar in range(length):
+        current_notes = deque()  # notes currently on
+        current_beat = 0.0  # current beat
+        wait_time_synth_chords = 0  # time since last MIDI message in ticks
+
+        # This assumes arrangement["synth_chords"] is sorted by beat
+        for note in arrangement["synth_chords"]:
+            if note["beat"] == current_beat:
+                # notes falling on the same beat
+                synth_chords_track.append(
+                    Message(
+                        'note_on',
+                        note=note["note"],
+                        velocity=note["velocity"],
+                        channel=CHANNEL_SYNTH,
+                        time=wait_time_synth_chords
+                    )
+                )
+                wait_time_synth_chords = 0
+                current_notes.append(note)
+            else:
+                # note off for currently on notes
+                wait_time_synth_chords = int(
+                    (note["beat"] - current_beat) * TICKS_PER_BEAT
+                )
+                current_beat = note["beat"]
+                while current_notes:
+                    current_note = current_notes.popleft()
+                    synth_chords_track.append(
+                        Message(
+                            'note_off',
+                            note=current_note["note"],
+                            velocity=current_note["velocity"],
+                            channel=CHANNEL_SYNTH,
+                            time=wait_time_synth_chords
+                        )
+                    )
+                    wait_time_synth_chords = 0
+
+                # note falling on a new beat
+                synth_chords_track.append(
+                    Message(
+                        'note_on',
+                        note=note["note"],
+                        velocity=note["velocity"],
+                        channel=CHANNEL_SYNTH,
+                        time=wait_time_synth_chords
+                    )
+                )
+                current_notes.append(note)
+
+        # clearing remaining on notes at the end of the bar
+        beats_advanced = BAR_LENGTH_IN_BEATS - current_beat
+        wait_time_synth_chords = int(beats_advanced * TICKS_PER_BEAT)
+
+        while current_notes:
+            current_note = current_notes.popleft()
+            synth_chords_track.append(
+                Message(
+                    'note_off',
+                    note=current_note["note"],
+                    velocity=current_note["velocity"],
+                    channel=CHANNEL_SYNTH,
+                    time=wait_time_synth_chords
+                )
+            )
+            wait_time_synth_chords = 0
+
+    logger.info("Parsing synth chords arrangement completed")
+    return mid
 
 
 def render_midi_with_sfizz(

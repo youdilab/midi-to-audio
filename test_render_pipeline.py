@@ -105,15 +105,23 @@ def verify_bundled_assets() -> None:
 
 def parse_arrangement_to_midi(arrangement: dict[str, Any]) -> Any:
     """
-    Build one or more MIDI tracks from the JSON arrangement using mido.
+    Convert a JSON arrangement into a multi-track MIDI file.
 
-    Hints:
-    - Import: ``from mido import Message, MidiFile, MidiTrack, bpm2tempo``
-    - Loop ``drum_grid`` once per bar in ``arrangement["length"]`` (16 steps per bar).
-    - Map each ``1`` in ``drum_grid`` to a kick hit on the corresponding 16th step.
-    - Convert ``synth_chords`` entries (note, velocity, beat) to note_on / note_off pairs.
-    - Use ``bpm2tempo(arrangement["tempo"])`` for the MIDI tempo meta message.
-    - Return a ``MidiFile`` (or a list of track-specific MidiFiles) for rendering.
+    Builds a MidiFile with 3 tracks: metadata (tempo and time
+    signature), drums (kick hits from the 16-step drum grid, repeated
+    once per bar), and synth chords (note on/off pairs derived from
+    beat-timed chord events).
+
+    Args:
+        arrangement: Parsed arrangement JSON containing:
+            - "tempo": Tempo in BPM.
+            - "length": Number of bars to render.
+            - "drum_grid": 16-step list where a ``1`` marks a kick hit.
+            - "synth_chords": List of chord notes, each with "note",
+              "velocity", and "beat" (assumed sorted by beat).
+
+    Returns:
+        MidiFile: The assembled MIDI file, ready for rendering.
     """
     logger.info("Parsing arrangement to MIDI (tempo=%s)", arrangement["tempo"])
 
@@ -265,17 +273,29 @@ def render_midi_with_sfizz(
     duration_sec: float,
 ) -> Any:
     """
-    Render audio from MIDI through an SFZ instrument.
+    Render a MIDI sequence to audio using an SFZ instrument via sfizz.
 
-    Hints:
-    - Python binding: ``import pysfizz`` (install the sfizz / pysfizz package).
-    - Load the SFZ: ``synth = pysfizz.Synth(sample_rate=..., block_size=...)``
-    - ``synth.load_sfz_file(str(sfz_path))``
-    - Schedule note_on / note_off from your MIDI data at the correct sample offsets.
-    - Pull blocks with ``synth.render(block_size)`` until ``duration_sec`` is covered.
-    - Or use ``synth.render_note(...)`` for one-shot hits.
-    - Peak-normalize the dry stem if levels are very quiet before returning.
-    - Return a float32 numpy array shaped ``(num_samples, 2)`` (samples × stereo).
+    Extracts note on/off events from every track in ``midi_data``, converts
+    each note's timing to sample offsets using the MIDI file's tempo (or a
+    default tempo if none is found), renders each note through the loaded
+    SFZ instrument, and mixes the results into a single stereo buffer. The
+    output is peak-normalized. If ``sfz_path`` doesn't exist, a silent stem
+    of the requested duration is returned instead.
+
+    Args:
+        midi_data: A parsed ``mido.MidiFile`` (or equivalent) containing one
+            or more tracks of note_on/note_off messages.
+        sfz_path: Path to the ``.sfz`` instrument definition to render with.
+        sample_rate: Output audio sample rate, in Hz.
+        block_size: Block size used internally by the sfizz synth engine.
+        duration_sec: Total duration of the rendered audio, in seconds.
+            Notes starting after this point are skipped; notes extending
+            past it are clipped to fit.
+
+    Returns:
+        np.ndarray: A float32 array of shape ``(num_samples, 2)``
+        (samples x stereo channels) containing the rendered, normalized
+        mix. Silent (all-zero) if ``sfz_path`` does not exist.
     """
     logger.info("Rendering MIDI via SFZ instrument at %s", sfz_path)
 
@@ -411,23 +431,24 @@ def render_midi_with_sfizz(
 
 def apply_master_chain(dry_audio: Any, sample_rate: int) -> Any:
     """
-    Process the rendered mix through a Pedalboard master chain.
+    Apply a fixed master processing chain to a rendered stereo mix 
+    with hardcoded parameters.
 
-    Required effect order: Saturation → Compressor → Delay
+    Runs the audio through a Pedalboard signal chain in a fixed order —
+    Saturation (gentle distortion for warmth/glue), Compressor (bus
+    compression), and Delay (feedback delay for space) and returns the
+    processed result in the same layout as the input.
 
-    Hints:
-    - ``from pedalboard import Pedalboard, Compressor, Delay, Distortion``
-    - Saturation: ``Distortion(drive_db=6.0)`` or similar gentle saturation.
-    - Compressor: set threshold, ratio, attack_ms, release_ms for bus glue.
-    - Delay: ``Delay(delay_seconds=0.35, feedback=0.4, mix=0.25)``
-    - Expect ``dry_audio`` as float32 shaped ``(num_samples, 2)``; return the same layout.
-    - Pedalboard expects ``(channels, samples)``, so transpose around processing::
+    Args:
+        dry_audio: Unprocessed stereo mix as a float32 array shaped
+            ``(num_samples, 2)``.
+        sample_rate: Audio sample rate, in Hz.
 
-          board = Pedalboard([...])
-          # Transpose before processing: Pedalboard expects (channels, samples).
-          processed = board(dry_audio.T, sample_rate)
-          # Transpose back to (num_samples, 2) for write_wav.
-          return processed.T
+    Returns:
+        np.ndarray: The processed stereo mix, float32, shaped
+        ``(num_samples, 2)`` — same layout as ``dry_audio``. Internally
+        transposed to ``(channels, samples)`` for Pedalboard and back
+        again before returning.
     """
     logger.info("Applying master chain: Saturation → Compressor → Delay")
 
